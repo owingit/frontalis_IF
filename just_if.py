@@ -233,27 +233,40 @@ def main():
                              'excitatory-inhibitory (EI), '
                              'excitatory-refractory(ER)'
                         )
-    parser.add_argument('--fc_data_fpath', type=str, default='data/frontalis_flashcounts.csv')
-    parser.add_argument('--if_data_fpath', type=str, default='data/frontalis_interflash.csv')
-    parser.add_argument('--ib_data_fpath', type=str, default='data/frontalis_interburst.csv')
-    parser.add_argument('--driven', action='store_true')
-    parser.add_argument('--driven_freq', type=parse_freqs, default=None,
-                        help='Comma-separated list of beta value floats')
-    parser.add_argument('--total_t', type=int, default=600)
-    parser.add_argument('--fl', type=float, default=0.03)
-    parser.add_argument('--n', type=int, default=2)
-    parser.add_argument('--n_trials', type=int, default=1)
-    parser.add_argument('--ks', type=parse_ks,
-                        help='Comma-separated list of beta value floats',
-                        default=None)
-    parser.add_argument('--log', action='store_true')
+    parser.add_argument('--fc_data_fpath', type=str, default='data/frontalis_flashcounts.csv',
+                        help='Path to the flash count distribution of P. frontalis from data')
+    parser.add_argument('--if_data_fpath', type=str, default='data/frontalis_interflash.csv',
+                        help='Path to the interflash interval distribution of P. frontalis from data')
+    parser.add_argument('--ib_data_fpath', type=str, default='data/frontalis_interburst.csv',
+                        help='Path to the interburst interval distribution of P. frontalis from data')
+    parser.add_argument('--driven', action='store_true',
+                        help='Whether to drive the dynamics with a LED mimic')
+    parser.add_argument('--driven_freq',
+                        type=parse_freqs,
+                        default=None,
+                        help='Comma-separated list of floats = driven frequency values in seconds. Defaults to 0.6')
+    parser.add_argument('--total_t', type=int, default=600,
+                        help='Total simulation time (seconds)')
+    parser.add_argument('--fl', type=float, default=0.03,
+                        help='Flash length from data (seconds)')
+    parser.add_argument('--n', type=int, default=2,
+                        help='Number of individuals to simulate')
+    parser.add_argument('--n_trials', type=int, default=1,
+                        help='Number of trials to per parameter set')
+    parser.add_argument('--ks',
+                        type=parse_ks,
+                        default=None,
+                        help='Comma-separated list of floats = refractory threshold parameter values. Defaults to 0.5')
+    parser.add_argument('--log', action='store_true',
+                        help='Whether to use logarithmic charging')
     parser.add_argument('--betas',
                         type=parse_betas,
-                        help='Comma-separated list of beta value floats',
-                        default=None
+                        default=None,
+                        help='Comma-separated list of floats = beta parameter values. Defaults to 0.5'
                         )
     parser.add_argument('--save_folder',
-                        default=os.getcwd())
+                        default=os.getcwd(),
+                        help='Where to save results, default is the current working dir')
 
     args = parser.parse_args()
 
@@ -269,10 +282,10 @@ def main():
         distlist.append('spiketimes_{}'.format(model_n))
 
     processes = []
-    for trial in range(n_trials):
-        for beta in betas:
-            for k in ks:
-                for driven_freq in driven_freqs:
+    for beta in betas:
+        for k in ks:
+            for driven_freq in driven_freqs:
+                for trial in range(n_trials):
                     p = Simulation(trial, beta, k, if_df, fc_df, ib_df, td, args.driven, driver,
                                    driven_freq, n_models, tT, dt, args.model_specifics, args.log)
                     processes.append(p)
