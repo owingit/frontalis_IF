@@ -1,5 +1,6 @@
 import numpy as np
 import math
+import random
 import os
 import pandas as pd
 
@@ -13,7 +14,7 @@ import analysis
 
 class Simulation:
     def __init__(self, trial_num, trial_beta, trial_k, if_df, fc_df, ib_df, trial_td, trial_driven, trial_driver,
-                 trial_driven_freq, trial_n_models, trial_T, dt, model_specifics, trial_log):
+                 trial_driven_freq, trial_n_models, trial_T, dt, model_specifics, trial_log, attn):
         self.trial_num = trial_num
         self.beta = trial_beta
         self.k = trial_k
@@ -29,6 +30,7 @@ class Simulation:
         self.dt = dt
         self.model = model_specifics
         self.log = trial_log
+        self.attn = attn
         self.stats = None
 
     def simulate(self):
@@ -93,15 +95,31 @@ class Simulation:
                                 rates[j] = self.ib_df.sample().values[0]
                                 flash_counts[j] = self.fc_df.sample().values[0]
 
-                # Coupling from other flashers
-                active_flashers = len([x for x in states if x != 'integrate'])
-                for indiv in range(self.n_models):
-                    if self.driven:
-                        if j == self.driver:
-                            V[j, i] = min(V[j, i], 1.0)
-                            V[j, i] = max(V[j, i], 0.0)
+                if random.random() < (1.0 - self.attn):
+                    # Coupling from other flashers
+                    active_flashers = len([x for x in states if x != 'integrate'])
+                    for indiv in range(self.n_models):
+                        if self.driven:
+                            if j == self.driver:
+                                V[j, i] = min(V[j, i], 1.0)
+                                V[j, i] = max(V[j, i], 0.0)
+                            else:
+                                if indiv != j and states[indiv] == 'reset' and states[j] == 'integrate':
+                                    if self.k <= V[j, i] <= 1:
+                                        V[j, i] += (b / active_flashers)
+                                        V[j, i] = min(V[j, i], 1.0)
+                                    elif 0 <= V[j, i] < self.k:
+                                        if ms == 'E':
+                                            V[j, i] += (b / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
+                                        elif ms == 'ER':
+                                            V[j, i] += (0 / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
+                                        else:  # EI
+                                            V[j, i] -= (b / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
                         else:
-                            if indiv != j and states[indiv] == 'reset' and states[j] == 'integrate':
+                            if indiv != j and states[indiv] == 'reset' and states[j] != 'reset':
                                 if self.k <= V[j, i] <= 1:
                                     V[j, i] += (b / active_flashers)
                                     V[j, i] = min(V[j, i], 1.0)
@@ -115,21 +133,6 @@ class Simulation:
                                     else:  # EI
                                         V[j, i] -= (b / active_flashers)
                                         V[j, i] = max(V[j, i], 0.0)
-                    else:
-                        if indiv != j and states[indiv] == 'reset' and states[j] != 'reset':
-                            if self.k <= V[j, i] <= 1:
-                                V[j, i] += (b / active_flashers)
-                                V[j, i] = min(V[j, i], 1.0)
-                            elif 0 <= V[j, i] < self.k:
-                                if ms == 'E':
-                                    V[j, i] += (b / active_flashers)
-                                    V[j, i] = max(V[j, i], 0.0)
-                                elif ms == 'ER':
-                                    V[j, i] += (0 / active_flashers)
-                                    V[j, i] = max(V[j, i], 0.0)
-                                else:  # EI
-                                    V[j, i] -= (b / active_flashers)
-                                    V[j, i] = max(V[j, i], 0.0)
 
         # stat keeping
         vs = []
@@ -148,10 +151,7 @@ class Simulation:
             statkeeping.update({'interbursts_{}'.format(j): intbs})
             statkeeping.update({'spiketimes_{}'.format(j): np.where(np.array(v_trace) == 1.0)[0]})
         self.stats = statkeeping
-        # dists_df = dists_df.append(
-        #         statkeeping, ignore_index=True
-        #     )
-        # analysis.plots(n_models, V, t, beta)
+        # analysis.plots(self.n_models, V, t, beta)
 
 
 def parse_betas(input_string):
@@ -247,6 +247,8 @@ def main():
                         help='Comma-separated list of floats = driven frequency values in seconds. Defaults to 0.6')
     parser.add_argument('--total_t', type=int, default=600,
                         help='Total simulation time (seconds)')
+    parser.add_argument('--attention_rate', type=float, default=0.833,
+                        help='Percentage of time spent looking at the driving signal')
     parser.add_argument('--fl', type=float, default=0.03,
                         help='Flash length from data (seconds)')
     parser.add_argument('--n', type=int, default=2,
@@ -287,7 +289,7 @@ def main():
             for driven_freq in driven_freqs:
                 for trial in range(n_trials):
                     p = Simulation(trial, beta, k, if_df, fc_df, ib_df, td, args.driven, driver,
-                                   driven_freq, n_models, tT, dt, args.model_specifics, args.log)
+                                   driven_freq, n_models, tT, dt, args.model_specifics, args.log, args.attention_rate)
                     processes.append(p)
 
     process_pool = Pool(int(multiprocessing.cpu_count() / 2))
