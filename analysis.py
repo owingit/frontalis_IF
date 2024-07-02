@@ -1,10 +1,15 @@
 import plotly.tools as tls
 import plotly.io as pio
 from scipy.stats import mode
+from scipy.stats import ks_2samp
 import pickle
+import ast
 import pandas as pd
 import pprint
 import numpy as np
+from matplotlib.colors import Normalize
+
+import seaborn as sns
 
 import matplotlib.pyplot as plt
 
@@ -126,3 +131,150 @@ def vis(stats, stat_keys, max_percentage, max_difference):
 
     pp = pprint.PrettyPrinter()
     pp.pprint(stats)
+
+
+def load_parameter_sweep_data(p):
+    # Define a function to concatenate lists
+    def concatenate_lists(series):
+        return [item for sublist in series for item in ast.literal_eval(sublist)]
+    fields = ['beta', 'k_thresh', 'driven_freq', 'interflashes_1', 'interbursts_1', 'spiketimes_1']
+    with open(p, 'r') as f:
+        res = pd.read_csv(f, usecols=fields)
+    res_combined = res.groupby(['beta', 'driven_freq', 'k_thresh'])['interflashes_1'].apply(concatenate_lists).reset_index()
+    return res_combined
+
+
+def compare_statistic(l1, l2, comp='ks'):
+    if comp == 'ks':
+        return ks_2samp(l1, l2)[0]
+    elif comp == 'median':
+        l1 = [x for x in l1 if not np.isnan(x)]
+        l2 = [x for x in l2 if not np.isnan(x)]
+
+        return abs(np.median(l1) - np.median(l2))
+    else:
+        return abs(np.mean(l1) - np.mean(l2))
+
+
+def compare_models(experimental, list_of_sims, plot=False):
+    for compare_method in ['ks','median']:
+        model_min_sums = []
+        model_level_heatmaps = []
+        for s in list_of_sims:
+            model_min_sum = 0
+            df_combined = s[1]
+            betas = df_combined['beta'].unique()
+            ks = df_combined['k_thresh'].unique()
+            xs = df_combined['driven_freq'].unique()
+
+            to_heatmap = {}
+            to_heatmap_sums = []
+            for i, beta in enumerate(betas):
+                for j, k in enumerate(ks):
+                    sum_of_vals = 0
+                    for df_i, driven_freq in enumerate(xs):
+                        subset = df_combined[(df_combined['beta'] == beta) & (df_combined['k_thresh'] == k) & (
+                                df_combined['driven_freq'] == driven_freq)]['interflashes_1']
+                        val = (beta, k, compare_statistic(subset.iloc[0], experimental[driven_freq], compare_method))
+                        sum_of_vals += val[2]
+                        if to_heatmap.get(driven_freq) is None:
+                            to_heatmap[driven_freq] = [val]
+                        else:
+                            to_heatmap[driven_freq].append(val)
+                    to_heatmap_sums.append((beta, k, sum_of_vals))
+            df_sums = pd.DataFrame(to_heatmap_sums, columns=['beta', 'k', 'sum_ks_stat'])
+            min_row = df_sums.loc[df_sums['sum_ks_stat'].idxmin()]
+            # Extract beta, k, and minimum ks_stat value
+            min_beta = min_row['beta']
+            min_k = min_row['k']
+            min_ks_stat = min_row['sum_ks_stat']  # Add titles and labels
+            # print('Model: {}, min_beta: {}, min_k: {}, min_ks_stat: {} summed across freqs'.format(
+            #     s[0],
+            #     min_beta,
+            #     min_k,
+            #     min_ks_stat)
+            # )
+            all_min_stats = []
+            model_level_heatmap = df_sums.pivot('beta', 'k', 'sum_ks_stat')
+            model_level_heatmaps.append(model_level_heatmap)
+            if plot:
+                plt.figure(figsize=(10, 6))
+                sns.heatmap(model_level_heatmap, annot=True, fmt=".4f", cmap="YlGnBu")
+                plt.title('{} diff for {} model between exp. dist and sim dist'.format(compare_method, s[0]))
+                plt.xlabel('k')
+                plt.ylabel('beta')
+                plt.savefig('figs/Heatmap_all_freqs_model_{}_method_{}.png'.format(s[0], compare_method))
+                plt.close()
+            for k in to_heatmap.keys():
+                df = pd.DataFrame(to_heatmap[k], columns=['beta', 'k', 'ks_stat'])
+                # Find the row with the minimum ks_stat value
+                min_row = df.loc[df['ks_stat'].idxmin()]
+                # Extract beta, k, and minimum ks_stat value
+                min_beta = min_row['beta']
+                min_k = min_row['k']
+                min_ks_stat = min_row['ks_stat']  # Add titles and labels
+                model_min_sum += min_ks_stat
+                all_min_stats.append(min_ks_stat)
+                to_heatmap_sums.append((min_beta, min_k, min_ks_stat))
+                heatmap_data = df.pivot('beta', 'k', 'ks_stat')
+                if plot:
+                    plt.figure(figsize=(10, 6))
+                    sns.heatmap(heatmap_data, annot=True, fmt=".4f", cmap="YlGnBu")
+                print('Model: {}, LED_Freq: {}, min_beta: {}, min_k: {}, {}: {}'.format(
+                    s[0], k, min_beta, min_k, compare_method, min_ks_stat)
+                )
+                if plot:
+                    plt.title('{} diff for {} model between exp. dist and sim dist, driven_freq = {}'.format(compare_method,
+                                                                                                             s[0], k)
+                              )
+                    plt.xlabel('k')
+                    plt.ylabel('beta')
+                    plt.savefig('figs/Heatmap_{}_diff_driven_freq_{}_model_{}.png'.format(compare_method, k, s[0]))
+                    plt.close()
+            model_min_std = np.std(all_min_stats)
+            model_min_mean = np.mean(all_min_stats)
+
+            model_min_sums.append((s[0], model_min_sum, model_min_std, model_min_mean))
+        combined_df = pd.concat(model_level_heatmaps, ignore_index=True)
+        min_combined = min(combined_df.values.flatten())
+        max_combined = max(combined_df.values.flatten())
+
+        dfs_to_plot = []
+        for model, df in zip(['Excitatory', 'Excitatory-refractory', 'Excitatory-inhibitory'], model_level_heatmaps):
+            dfs_to_plot.append((model, df))
+
+        if plot:
+            fig = plt.figure(figsize=(18, 6))
+
+            colors = ['cividis', 'cividis', 'cividis']  # Colormaps for each DataFrame
+            elev = 20  # Elevation angle
+            azim = -60  # Azimuth angle
+            for i, (model, df) in enumerate(dfs_to_plot):
+                ax = fig.add_subplot(1, 3, i + 1, projection='3d')
+
+                rows, cols = df.shape
+                x = np.arange(rows)
+                y = np.arange(cols)
+                x, y = np.meshgrid(x, y)
+                z = df.values.T  # Transpose to align with x and y
+                norm = Normalize(vmin=np.min(z), vmax=np.max(z))
+
+                ax.plot_surface(x, y, z, cmap=colors[i], norm=norm, alpha=0.7)
+
+                ax.set_title(model)
+                ax.set_xlabel('Beta')
+                ax.set_ylabel('K')
+                ax.set_zlabel('Normalized Sum {} Difference'.format(compare_method))
+                ax.set_zlim(min_combined - 0.05, max_combined + 0.05)
+                ax.view_init(elev=elev, azim=azim)  # Set consistent view angle
+
+            plt.tight_layout()
+            plt.savefig('Normalized_Sum_{}_Difference_plane_{}.png'.format(compare_method, s[0]))
+            plt.close()
+
+        for (m,kss,mms,mmm) in model_min_sums:
+            print('Model: {}, min_ks_stat_sum: {}, min_ks_stat_std: {}, min_ks_stat_mean: {}'.format(
+                m, kss, mms, mmm)
+            )
+    print('here')
+

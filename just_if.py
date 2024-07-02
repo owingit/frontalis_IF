@@ -32,6 +32,11 @@ class Simulation:
         self.log = trial_log
         self.attn = attn
         self.stats = None
+        self.wiener_process = np.cumsum(np.random.normal(0, np.sqrt(self.dt), self.T))
+
+        # Normalize to range between 0 and 1
+        self.wiener_process = (self.wiener_process -
+                               np.min(self.wiener_process)) / (np.max(self.wiener_process) - np.min(self.wiener_process))
 
     def simulate(self):
         b = self.beta
@@ -95,7 +100,7 @@ class Simulation:
                                 rates[j] = self.ib_df.sample().values[0]
                                 flash_counts[j] = self.fc_df.sample().values[0]
 
-                if random.random() < (1.0 - self.attn):
+                if self.wiener_process[i] < (1.0 - self.attn):
                     # Coupling from other flashers
                     active_flashers = len([x for x in states if x != 'integrate'])
                     for indiv in range(self.n_models):
