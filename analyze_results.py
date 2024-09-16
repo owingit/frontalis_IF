@@ -1,37 +1,77 @@
-import numpy as np
-import math
-import random
-import os
-import pandas as pd
 import pickle
-import matplotlib.pyplot as plt
-
-import multiprocessing
-from multiprocessing import Manager, Process, Pool
-import seaborn as sns
 
 import argparse
 
 import analysis
 
-p = 'driven_res/dists_E_100.csv'
-excitatory_results = analysis.load_parameter_sweep_data(p)
 
-p = 'driven_res/dists_ER_100.csv'
-excitatory_refractory_results = analysis.load_parameter_sweep_data(p)
+def load_from_csvs(cp):
+    p = cp[0]
+    e_r = analysis.load_parameter_sweep_data(p)
+    print('loaded E')
 
-p = 'driven_res/dists_EI_100.csv'
-excitatory_inhibitory_results = analysis.load_parameter_sweep_data(p)
+    p = cp[1]
+    er_r = analysis.load_parameter_sweep_data(p)
+    print('loaded ER')
 
-with open('driven_res/all_afters_from_experiments_20240607.pickle', 'rb') as f:
-    output_dist = pickle.load(f)
-expected_afters = {}
-for led_freq in [0.3, 0.4, 0.5, 0.6, 0.7, 0.77, 0.85, 1.0]:
-    expected_afters[led_freq] = output_dist[str(int(led_freq * 1000))]
+    p = cp[2]
+    ei_r = analysis.load_parameter_sweep_data(p)
+    print('loaded EI')
+    return e_r, er_r, ei_r
 
-models = [('Excitatory', excitatory_results),
-          ('Excitatory-refractory', excitatory_refractory_results),
-          ('Excitatory-inhibitory', excitatory_inhibitory_results)]
 
-analysis.compare_models(expected_afters, models, plot=True)
-print('here')
+def load_from_pickles(pp):
+    p = pp[0]
+    with open(p, 'rb') as f:
+        e_r = pickle.load(f)
+    print('loaded E')
+    p = pp[1]
+    with open(p, 'rb') as f:
+        er_r = pickle.load(f)
+    print('loaded ER')
+    p = pp[2]
+    with open(p, 'rb') as f:
+        ei_r = pickle.load(f)
+    print('loaded EI')
+    return e_r, er_r, ei_r
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='Two-timescale IF Model ANALYSIS module',
+        description='Implements analysis of results of integrate-and-fire model compared with experiments',
+    )
+    parser.add_argument('--use_csvs', action='store_true')
+    parser.add_argument('--data_folder', type=str, default='driven_res')
+    parser.add_argument('--output', type=str, default='all_afters_from_experiments_20240607')
+    args = parser.parse_args()
+
+    with open('{}/{}.pickle'.format(args.data_folder, args.output), 'rb') as f:
+        output_dist = pickle.load(f)
+    print('loaded output')
+    led_freqs = [0.3, 0.4, 0.5, 0.6, 0.7, 0.77, 0.85, 1.0]
+    expected_afters = {}
+    for led_freq in led_freqs:
+        expected_afters[led_freq] = output_dist[str(int(led_freq * 1000))]
+
+    csv_paths = ['{}/dists_E.csv'.format(args.data_folder),
+                 '{}/dists_ER.csv'.format(args.data_folder),
+                 '{}/dists_EI.csv'.format(args.data_folder)]
+    pickle_paths = ['{}/Excitatory_df_combined_0731.pickle'.format(args.data_folder),
+                    '{}/Excitatory-refractory_df_combined_0731.pickle'.format(args.data_folder),
+                    '{}/Excitatory-inhibitory_df_combined_0731.pickle'.format(args.data_folder)]
+    if args.use_csvs:
+        excitatory_results, excitatory_refractory_results, excitatory_inhibitory_results = load_from_csvs(csv_paths)
+    else:
+        excitatory_results, excitatory_refractory_results, excitatory_inhibitory_results = load_from_pickles(pickle_paths)
+
+    models = [('Excitatory', excitatory_results),
+              ('Excitatory-refractory', excitatory_refractory_results),
+              ('Excitatory-inhibitory', excitatory_inhibitory_results)]
+
+    analysis.compare_models(expected_afters, models, plot=True)
+    print('Done')
+
+
+if __name__ == "__main__":
+    main()

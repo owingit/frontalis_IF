@@ -1,6 +1,7 @@
 import numpy as np
 import math
 import random
+import networkx as nx
 import os
 import pandas as pd
 
@@ -14,7 +15,7 @@ import analysis
 
 class Simulation:
     def __init__(self, trial_num, trial_beta, trial_k, if_df, fc_df, ib_df, trial_td, trial_driven, trial_driver,
-                 trial_driven_freq, trial_n_models, trial_T, dt, model_specifics, trial_log, attn):
+                 trial_driven_freq, trial_n_models, trial_T, dt, model_specifics, trial_log, attn, on_grid):
         self.trial_num = trial_num
         self.beta = trial_beta
         self.k = trial_k
@@ -32,15 +33,46 @@ class Simulation:
         self.log = trial_log
         self.attn = attn
         self.stats = None
-        self.wiener_process = np.cumsum(np.random.normal(0, np.sqrt(self.dt), self.T))
+        self.v_results = None
+        self.status = False
+        self.time_vector = None
+        self.w_p = np.cumsum(np.random.normal(0, np.sqrt(self.dt), int(self.T/self.dt)))
+        self.w_p = (self.w_p - np.min(self.w_p)) / (np.max(self.w_p) - np.min(self.w_p))
 
-        # Normalize to range between 0 and 1
-        self.wiener_process = (self.wiener_process -
-                               np.min(self.wiener_process)) / (np.max(self.wiener_process) - np.min(self.wiener_process))
+        if on_grid:
+            self.connectivity_graph = self.initialize_grid_network(0.8, 0.2)
+        else:
+            self.connectivity_graph = None
+
+    def initialize_grid_network(self, neighbor_probability, distant_probability):
+        size = int(math.sqrt(self.n_models))
+        G = nx.grid_2d_graph(size, size)
+
+        for (u, v) in G.edges():
+            if random.random() >= neighbor_probability:
+                G.remove_edge(u, v)
+
+        nodes = list(G.nodes())
+        for i in range(size * size):
+            for j in range(i + 1, size * size):
+                if not G.has_edge(nodes[i], nodes[j]):
+                    if random.random() < distant_probability:
+                        G.add_edge(nodes[i], nodes[j])
+
+        return G
 
     def simulate(self):
-        b = self.beta
+        ##
+        #
+        # Simulates the two-timescale light-controlled oscillator dynamics with n_models individuals
+        # The model_selection 'E' runs excitatory-only dynamics (beta is always positive)
+        # The model_selection 'ER' runs excitatory-refractory dynamics (beta is always positive or 0)
+        # The model_selection 'EI' runs excitatory-inhibitory dynamics (beta is positive or negative)
+        # Simulation dynamics are carried out on a (n_models, timesteps) array
+        #
+        ##
 
+        b = self.beta
         ms = self.model
         print('Trial {} - k {} - beta {} - driven freq {}'.format(self.trial_num,
                                                                   self.k,
@@ -59,11 +91,10 @@ class Simulation:
         states = np.full(self.n_models, 'integrate', dtype='<U10')  # States for all models
         flash_counts = np.full(self.n_models, initial_fcs)
 
-        #  Model dynamics
+        #  Model dynamics loop
         V = np.zeros((self.n_models, len(t)))
         V[:, 0] = np.random.rand(self.n_models)
         for i in range(1, len(t)):
-            assert (rates[0] == self.driven_freq)
             for j in range(self.n_models):
                 if states[j] == 'integrate':
                     rate = (self.dt / rates[j])
@@ -100,15 +131,21 @@ class Simulation:
                                 rates[j] = self.ib_df.sample().values[0]
                                 flash_counts[j] = self.fc_df.sample().values[0]
 
-                if self.wiener_process[i] < (1.0 - self.attn):
-                    # Coupling from other flashers
+                # Coupling from other flashers
+                # If the wiener process is true (sight lines are established) do coupling, else skip
+                if self.w_p[i] < self.attn:
                     active_flashers = len([x for x in states if x != 'integrate'])
+                    # go through all other individuals
                     for indiv in range(self.n_models):
                         if self.driven:
+                            # If j (acting individual) is the driver, it does not receive coupling
                             if j == self.driver:
                                 V[j, i] = min(V[j, i], 1.0)
                                 V[j, i] = max(V[j, i], 0.0)
                             else:
+                                # If j (acting individual) is not the neighbor indiv, it receives coupling if
+                                # a) indiv is resetting (flashing)
+                                # b) j (acting individual) is integrating (charging)
                                 if indiv != j and states[indiv] == 'reset' and states[j] == 'integrate':
                                     if self.k <= V[j, i] <= 1:
                                         V[j, i] += (b / active_flashers)
@@ -124,28 +161,43 @@ class Simulation:
                                             V[j, i] -= (b / active_flashers)
                                             V[j, i] = max(V[j, i], 0.0)
                         else:
-                            if indiv != j and states[indiv] == 'reset' and states[j] != 'reset':
-                                if self.k <= V[j, i] <= 1:
-                                    V[j, i] += (b / active_flashers)
-                                    V[j, i] = min(V[j, i], 1.0)
-                                elif 0 <= V[j, i] < self.k:
-                                    if ms == 'E':
+                            if self.connectivity_graph:
+                                if indiv != j and states[indiv] == 'reset' and states[j] != 'reset' and \
+                                        self.connectivity_graph.has_edge(indiv, j):
+                                    if self.k <= V[j, i] <= 1:
                                         V[j, i] += (b / active_flashers)
-                                        V[j, i] = max(V[j, i], 0.0)
-                                    elif ms == 'ER':
-                                        V[j, i] += (0 / active_flashers)
-                                        V[j, i] = max(V[j, i], 0.0)
-                                    else:  # EI
-                                        V[j, i] -= (b / active_flashers)
-                                        V[j, i] = max(V[j, i], 0.0)
+                                        V[j, i] = min(V[j, i], 1.0)
+                                    elif 0 <= V[j, i] < self.k:
+                                        if ms == 'E':
+                                            V[j, i] += (b / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
+                                        elif ms == 'ER':
+                                            V[j, i] += (0 / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
+                                        else:  # EI
+                                            V[j, i] -= (b / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
+                            else:
+                                if indiv != j and states[indiv] == 'reset' and states[j] != 'reset':
+                                    if self.k <= V[j, i] <= 1:
+                                        V[j, i] += (b / active_flashers)
+                                        V[j, i] = min(V[j, i], 1.0)
+                                    elif 0 <= V[j, i] < self.k:
+                                        if ms == 'E':
+                                            V[j, i] += (b / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
+                                        elif ms == 'ER':
+                                            V[j, i] += (0 / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
+                                        else:  # EI
+                                            V[j, i] -= (b / active_flashers)
+                                            V[j, i] = max(V[j, i], 0.0)
 
         # stat keeping
         vs = []
         for j in range(self.n_models):
             v = [0 if x < 1 else 1 for x in V[j]]
             vs.append(v)
-        # if n_models == 2:
-        #     percentage = analysis.calculate_percentage(vs[0], vs[1], window_size=int(5 / dt))
 
         statkeeping = {'beta': b, 'k_thresh': self.k, 'n_models': self.n_models, 'driven_freq': self.driven_freq}
         for j, v_trace in enumerate(vs):
@@ -155,8 +207,11 @@ class Simulation:
             statkeeping.update({'interflashes_{}'.format(j): intfs})
             statkeeping.update({'interbursts_{}'.format(j): intbs})
             statkeeping.update({'spiketimes_{}'.format(j): np.where(np.array(v_trace) == 1.0)[0]})
+
         self.stats = statkeeping
-        # analysis.plots(self.n_models, V, t, beta)
+        self.v_results = V
+        self.time_vector = t
+        self.status = True
 
 
 def parse_betas(input_string):
@@ -204,7 +259,7 @@ def setup_params(args, dt):
     if args.ks is None or len(args.ks) == 0:
         args.ks = [0.5]
     if args.driven_freq is None or len(args.driven_freq) == 0:
-        args.driven_freq = [0.6]
+        args.driven_freq = [None]
     betas = args.betas
     ks = args.ks
     driven_freqs = args.driven_freq
@@ -250,7 +305,7 @@ def main():
                         type=parse_freqs,
                         default=None,
                         help='Comma-separated list of floats = driven frequency values in seconds. Defaults to 0.6')
-    parser.add_argument('--total_t', type=int, default=600,
+    parser.add_argument('--total_t', type=int, default=400,
                         help='Total simulation time (seconds)')
     parser.add_argument('--attention_rate', type=float, default=0.833,
                         help='Percentage of time spent looking at the driving signal')
@@ -271,6 +326,10 @@ def main():
                         default=None,
                         help='Comma-separated list of floats = beta parameter values. Defaults to 0.5'
                         )
+    parser.add_argument('--visualize_simulation', action='store_true',
+                        help='Whether to visualize time series from simulation instance(s)')
+    parser.add_argument('--on_grid', action='store_true',
+                        help='Whether to run on a predefined grid embedding')
     parser.add_argument('--save_folder',
                         default=os.getcwd(),
                         help='Where to save results, default is the current working dir')
@@ -293,14 +352,21 @@ def main():
         for k in ks:
             for driven_freq in driven_freqs:
                 for trial in range(n_trials):
-                    p = Simulation(trial, beta, k, if_df, fc_df, ib_df, td, args.driven, driver,
-                                   driven_freq, n_models, tT, dt, args.model_specifics, args.log, args.attention_rate)
+                    p = Simulation(trial, beta, k, if_df, fc_df, ib_df, td, args.driven, driver, driven_freq, n_models,
+                                   tT, dt,
+                                   args.model_specifics,
+                                   args.log,
+                                   args.attention_rate,
+                                   args.on_grid)
                     processes.append(p)
 
     process_pool = Pool(int(multiprocessing.cpu_count() / 2))
     process_results = process_pool.map(run_sim, processes)
 
     final_results = [pr.stats for pr in process_results]
+    if args.visualize_simulation:
+        for fr in final_results:
+            analysis.plots(fr.n_models, fr.v_results, fr.time_vector, fr.beta)
 
     dists_df = pd.DataFrame(final_results)
     dists_df.to_csv('{}/dists.csv'.format(args.save_folder), index=False)

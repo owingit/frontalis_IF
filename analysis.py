@@ -1,5 +1,8 @@
 import plotly.tools as tls
 import plotly.io as pio
+import datetime
+from matplotlib import cm
+import sys
 from scipy.stats import mode
 from scipy.stats import ks_2samp
 import pickle
@@ -7,6 +10,7 @@ import ast
 import pandas as pd
 import pprint
 import numpy as np
+import dask.dataframe as dd
 from matplotlib.colors import Normalize
 
 import seaborn as sns
@@ -137,10 +141,21 @@ def load_parameter_sweep_data(p):
     # Define a function to concatenate lists
     def concatenate_lists(series):
         return [item for sublist in series for item in ast.literal_eval(sublist)]
+
     fields = ['beta', 'k_thresh', 'driven_freq', 'interflashes_1', 'interbursts_1', 'spiketimes_1']
+
     with open(p, 'r') as f:
         res = pd.read_csv(f, usecols=fields)
-    res_combined = res.groupby(['beta', 'driven_freq', 'k_thresh'])['interflashes_1'].apply(concatenate_lists).reset_index()
+
+    print('dataframe loaded from {} at {}'.format(p.split('/')[1][:-4], datetime.datetime.now().time()))
+
+    res_combined = res.groupby(['beta', 'driven_freq', 'k_thresh'])['interflashes_1'].apply(
+        concatenate_lists).reset_index()
+
+    print('grouped at {}'.format(datetime.datetime.now().time()))
+
+    print('{} with concatenated interflashes combined and returned at {}'.format(p.split('/')[1][:-4],
+                                                                                 datetime.datetime.now().time()))
     return res_combined
 
 
@@ -157,15 +172,52 @@ def compare_statistic(l1, l2, comp='ks'):
 
 
 def compare_models(experimental, list_of_sims, plot=False):
+    plot = True
+    colormap = cm.get_cmap('Spectral', 24)
+    comparison_across = {}
+    colors = {'Excitatory': 'gray',
+              'Excitatory-inhibitory': 'limegreen',
+              'Excitatory-refractory': 'rosybrown'}
     for compare_method in ['ks','median']:
+        if compare_method == 'ks':
+            norm_all = Normalize(vmin=np.min(1.75), vmax=np.max(3.0))
+        else:
+            norm_all = Normalize(vmin=np.min(0.50), vmax=np.max(0.80))
+        freq_level = {}
         model_min_sums = []
         model_level_heatmaps = []
         for s in list_of_sims:
+            freq_level[s[0]] = {}
             model_min_sum = 0
             df_combined = s[1]
             betas = df_combined['beta'].unique()
             ks = df_combined['k_thresh'].unique()
             xs = df_combined['driven_freq'].unique()
+            for ii,x in enumerate(xs):
+                for beta in betas:
+                    for k in ks:
+                        fig1, ax1 = plt.subplots()
+                        subset = df_combined[(df_combined['beta'] == beta) & (df_combined['k_thresh'] == k) & (
+                                    df_combined['driven_freq'] == x)]['interflashes_1']
+                        c_statistic = compare_statistic(subset.iloc[0], experimental[x], compare_method)
+                        if freq_level[s[0]].get(x) is None:
+                            freq_level[s[0]][x] = [
+                                (beta, k, c_statistic)]
+                        else:
+                            freq_level[s[0]][x].append(
+                                (beta, k, c_statistic))
+                        ax1.hist(subset, density=True, bins=np.arange(0.0, 2.0, 0.03), color='grey', alpha=0.7)
+                        if ii == 4:
+                            color = 'yellow'
+                        else:
+                            color = colormap.__call__(ii * 3)
+                        ax1.hist(experimental[x], density=True, bins=np.arange(0.0, 2.0, 0.03),
+                                 color=color, alpha=0.7)
+                        if compare_method == 'ks':
+                            plt.savefig('figs/histogram_comparisons/{}{}_{}ms_{}beta_{}k_{}.png'.format(
+                                c_statistic, compare_method, x, beta, k, s[0])
+                            )
+                        plt.close(fig1)
 
             to_heatmap = {}
             to_heatmap_sums = []
@@ -188,18 +240,19 @@ def compare_models(experimental, list_of_sims, plot=False):
             min_beta = min_row['beta']
             min_k = min_row['k']
             min_ks_stat = min_row['sum_ks_stat']  # Add titles and labels
-            # print('Model: {}, min_beta: {}, min_k: {}, min_ks_stat: {} summed across freqs'.format(
-            #     s[0],
-            #     min_beta,
-            #     min_k,
-            #     min_ks_stat)
-            # )
+            print('Model: {}, min_beta: {}, min_k: {}, min_{}_stat: {} summed across freqs'.format(
+                s[0],
+                min_beta,
+                min_k,
+                compare_method,
+                min_ks_stat)
+            )
             all_min_stats = []
             model_level_heatmap = df_sums.pivot('beta', 'k', 'sum_ks_stat')
             model_level_heatmaps.append(model_level_heatmap)
             if plot:
                 plt.figure(figsize=(10, 6))
-                sns.heatmap(model_level_heatmap, annot=True, fmt=".4f", cmap="YlGnBu")
+                sns.heatmap(model_level_heatmap, annot=True, fmt=".4f", cmap="YlGnBu", norm=norm_all)
                 plt.title('{} diff for {} model between exp. dist and sim dist'.format(compare_method, s[0]))
                 plt.xlabel('k')
                 plt.ylabel('beta')
@@ -217,6 +270,12 @@ def compare_models(experimental, list_of_sims, plot=False):
                 all_min_stats.append(min_ks_stat)
                 to_heatmap_sums.append((min_beta, min_k, min_ks_stat))
                 heatmap_data = df.pivot('beta', 'k', 'ks_stat')
+                if compare_method == 'ks':
+                    if comparison_across.get(s[0]):
+                        comparison_across[s[0]].append((k, min_ks_stat))
+                    else:
+                        comparison_across[s[0]]= [(k, min_ks_stat)]
+
                 if plot:
                     plt.figure(figsize=(10, 6))
                     sns.heatmap(heatmap_data, annot=True, fmt=".4f", cmap="YlGnBu")
@@ -273,8 +332,23 @@ def compare_models(experimental, list_of_sims, plot=False):
             plt.close()
 
         for (m,kss,mms,mmm) in model_min_sums:
-            print('Model: {}, min_ks_stat_sum: {}, min_ks_stat_std: {}, min_ks_stat_mean: {}'.format(
-                m, kss, mms, mmm)
+            print('Model: {}, min_{}_stat_sum: {}, min_{}_stat_std: {}, min_{}_stat_mean: {}'.format(
+                m, compare_method, kss, compare_method, mms, compare_method, mmm)
             )
+    print(comparison_across)
+    fig, ax = plt.subplots()
+    for k in comparison_across.keys():
+        std = 0
+        for result in model_min_sums:
+            if k in result:
+                std = result[3]
+        xs = [x[0] for x in comparison_across[k]]
+        ys = [x[1] for x in comparison_across[k]]
+        ax.errorbar(xs, ys, yerr=(std / 2), color=colors[k], capsize=2, label=k)
+        ax.scatter(xs, ys, color=colors[k])
+        ax.set_xlabel('LED Freq(s)')
+        ax.set_ylabel('Min KS stat between experimental result and simulated result')
+        ax.set_title('Model comparison')
+        plt.legend()
     print('here')
 
