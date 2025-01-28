@@ -1,10 +1,14 @@
 Multiprocessed simulation of parameter sweeps for various integrate and fire models of P.frontalis synchronization
 
-usage: Two-timescale IF Model [-h] [--model_specifics MODEL_SPECIFICS] [--fc_data_fpath FC_DATA_FPATH] [--if_data_fpath IF_DATA_FPATH]
+Implements two-timescale integrate-and-fire model on any number of connected agents
+Additionally implements comparative analysis between simulation results and results from driven experiments on P. frontalis fireflies. 
+Data from experiments is housed in data/all_afters_from_experiments.pickle, as well as in raw form at [this accompanying GitHub repository](www.github.com/owingit/led_firesync)
+
+
+Simulation: 
+Two-timescale IF Model [-h] [--model_specifics MODEL_SPECIFICS] [--fc_data_fpath FC_DATA_FPATH] [--if_data_fpath IF_DATA_FPATH]
                               [--ib_data_fpath IB_DATA_FPATH] [--driven] [--driven_freq DRIVEN_FREQ] [--total_t TOTAL_T] [--fl FL] [--n N] [--n_trials N_TRIALS]
                               [--ks KS] [--log] [--betas BETAS] [--save_folder SAVE_FOLDER]
-
-Implements two-timescale integrate-and-fire model on any number of connected agents
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -45,3 +49,6 @@ optional arguments:
 
 
 Default data paths point to the files in the data/ repository. 
+
+Analysis usage:
+python analyze_results.py --plot 
