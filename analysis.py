@@ -1,5 +1,8 @@
 import plotly.tools as tls
 import plotly.io as pio
+import plotly.graph_objects as go
+import os
+from plotly.subplots import make_subplots
 import datetime
 from matplotlib import cm
 import matplotlib.colors as mcolors
@@ -197,7 +200,7 @@ def vis(stats, stat_keys, max_percentage, max_difference):
     pp.pprint(stats)
 
 
-def load_parameter_sweep_data(p):
+def load_parameter_sweep_data(p, pickle=False):
     # Define a function to concatenate lists
     def concatenate_lists(series):
         return [item for sublist in series for item in ast.literal_eval(sublist)]
@@ -216,6 +219,10 @@ def load_parameter_sweep_data(p):
 
     print('{} with concatenated interflashes combined and returned at {}'.format(p.split('/')[1][:-4],
                                                                                  datetime.datetime.now().time()))
+    if pickle:
+        res_combined.to_pickle('{}/{}_df_combined.pickle'.format(p.split('/')[0], p.split('/')[1][:-4]))
+        print('Pickled to {}/{}_df_combined.pickle'.format(p.split('/')[0], p.split('/')[1][:-4]))
+
     return res_combined
 
 
@@ -225,9 +232,26 @@ def get_color_from_mesh(beta):
     return cmap(beta)
 
 
+def hellinger_distance(p, q):
+    return (1/np.sqrt(2)) * np.sqrt(np.sum((np.sqrt(p) - np.sqrt(q))**2))
+
+
 def compare_statistic(l1, l2, comp='ks'):
     if comp == 'ks':
         return ks_2samp(l1, l2)[0]
+    elif comp == 'kl':
+        from scipy.stats import entropy
+
+        hist_P, bin_edges_P = np.histogram(l1, bins=np.arange(0.0, 2.0, 0.04), density=True)
+        hist_Q, bin_edges_Q = np.histogram(l2, bins=np.arange(0.0, 2.0, 0.04), density=True)
+
+        # Add a small epsilon to avoid division by zero
+        epsilon = 1e-10
+
+        # Calculate the KL divergence
+        kl_divergence = np.sum(hist_P * np.log((hist_P + epsilon) / (hist_Q + epsilon)))
+        return kl_divergence
+
     elif comp == 'median':
         l1 = [x for x in l1 if not np.isnan(x)]
         l2 = [x for x in l2 if not np.isnan(x)]
@@ -243,6 +267,16 @@ def compare_statistic(l1, l2, comp='ks'):
         mode_b = x_vals[np.argmax(kde_b(x_vals))]
 
         return abs(mode_a - mode_b)
+    elif comp == 'cramervm':
+        from scipy.stats import cramervonmises_2samp
+        stat = cramervonmises_2samp(l1, l2)
+        return round(stat.statistic, 3) / 100
+    elif comp == 'hellinger':
+        hist_exp, bin_edges = np.histogram(l2, bins=np.arange(0.0, 2.0, 0.04), density=True)
+        hist_sim, _ = np.histogram(l1, bins=np.arange(0.0, 2.0, 0.04), density=True)
+
+        c_statistic = hellinger_distance(hist_exp, hist_sim)
+        return c_statistic
     else:
         # Approximate bayesian computation here
 
@@ -255,17 +289,263 @@ def map_value_in_range(val, in_min=0, in_max=1, out_min=0.2, out_max=0.8):
     return out_min + (val - in_min) * (out_max - out_min) / (in_max - in_min)
 
 
+def generate_heatmap(experimental, list_of_sims, compare_method='ks', plot=True):
+    comparison_across = {}
+    model_min_sums = []
+    for s in list_of_sims:
+        df_combined = s[1]
+        model_min_sum = 0
+        betas = df_combined['beta'].unique()
+        ks = df_combined['k_thresh'].unique()
+        xs = df_combined['driven_freq'].unique()
+
+        to_heatmap = {}
+        to_heatmap_sums = []
+        for i, beta in enumerate(betas):
+            for j, k in enumerate(ks):
+                sum_of_vals = 0
+                for df_i, driven_freq in enumerate(xs):
+                    subset = df_combined[(df_combined['beta'] == beta) &
+                                         (df_combined['k_thresh'] == k) &
+                                         (df_combined['driven_freq'] == driven_freq)]['interflashes_1']
+
+                    val = (beta, k, compare_statistic(subset.iloc[0], experimental[driven_freq], compare_method))
+                    sum_of_vals += val[2]
+                    if to_heatmap.get(driven_freq) is None:
+                        to_heatmap[driven_freq] = [val]
+                    else:
+                        to_heatmap[driven_freq].append(val)
+
+                to_heatmap_sums.append((beta, k, sum_of_vals))
+        all_min_stats = []
+
+        for k in to_heatmap.keys():
+            df = pd.DataFrame(to_heatmap[k], columns=['beta', 'k', 'ks_stat'])
+
+            sorted_df = df.sort_values('ks_stat')
+
+            min_ks_stats = sorted_df.head(3)['ks_stat'].values
+
+            avg_min_ks_stat = np.mean(min_ks_stats)
+            std_min_ks_stat = np.std(min_ks_stats)
+
+            model_min_sum += avg_min_ks_stat
+            all_min_stats.append(avg_min_ks_stat)
+
+            if comparison_across.get(s[0]) is None:
+                comparison_across[s[0]] = []
+            comparison_across[s[0]].append((k, avg_min_ks_stat, std_min_ks_stat))
+
+            heatmap_data = df.pivot('beta', 'k', 'ks_stat')
+            plt.figure(figsize=(10, 6))
+            sns.heatmap(heatmap_data, annot=True, fmt=".4f", cmap="YlGnBu")
+            plt.title('{} diff for {} model between exp. dist and sim dist, driven_freq = {}'.format(
+                compare_method, s[0], k))
+            plt.xlabel('k')
+            plt.ylabel('beta')
+            plt.savefig('figs/Heatmap_{}_diff_driven_freq_{}_model_{}.png'.format(compare_method, k, s[0]))
+            plt.close()
+
+        model_min_std = np.std(all_min_stats)
+        model_min_mean = np.mean(all_min_stats)
+
+        model_min_sums.append((s[0], model_min_sum, model_min_std, model_min_mean))
+
+    # Plot comparison across models
+    colors = {'Excitatory': 'gray', 'Excitatory-inhibitory': 'limegreen', 'Excitatory-refractory': 'rosybrown'}
+    fig, ax = plt.subplots()
+
+    for i, k in enumerate(comparison_across.keys()):
+            avg_vals = [x[1] for x in comparison_across[k]]
+            std_vals = [x[2] for x in comparison_across[k]]
+            freqs = [x[0] for x in comparison_across[k]]
+
+            ax.errorbar(freqs, avg_vals, yerr=std_vals, color=colors[k], capsize=2, label=k)
+            ax.scatter(freqs, avg_vals, color=colors[k])
+    ax.set_xlabel('k')
+    ax.set_ylabel('Average of Minimum {} Stats'.format(compare_method))
+    ax.set_title(f'Comparison of Models: {compare_method}')
+    plt.legend()
+    plt.savefig(f'figs/Aggregate_model_comparison_{compare_method}.png')
+    plt.close()
+
+
+# under construction
+def generate_histograms(experimental, list_of_sims,):
+    colormap = cm.get_cmap('Spectral', 24)
+
+    for model_name, df_combined in list_of_sims:
+        betas = np.linspace(0.1, 1.0, 10)
+        ks = np.linspace(0.0, 0.9, 10)
+        driven_freqs = df_combined['driven_freq'].unique()
+
+        for ii, driven_freq in enumerate(driven_freqs):
+            exp_data = experimental.get(driven_freq)
+
+            fig = go.Figure()
+            axis_settings = {}
+
+            grid_size = 10
+            cell_size = 1 / grid_size
+            annotations = []
+            links = []
+            os.makedirs("figs/fullsize", exist_ok=True)
+
+            for i, beta in enumerate(betas):
+                for j, k in enumerate(ks):
+                    axis_idx = i * grid_size + j + 1
+                    xaxis_name = f"x{axis_idx}"
+                    yaxis_name = f"y{axis_idx}"
+
+                    subset = df_combined[
+                        (round(df_combined['beta'], 2) == round(beta, 2)) &
+                        (round(df_combined['k_thresh'], 2) == round(k, 2)) &
+                        (df_combined['driven_freq'] == driven_freq)
+                    ]['interflashes_1']
+
+                    sim_data = subset.iloc[0]
+
+                    rgba = colormap(ii * 3)
+                    color = f"rgb({int(rgba[0] * 255)}, {int(rgba[1] * 255)}, {int(rgba[2] * 255)})"
+                    if ii == 4:
+                        color = 'yellow'
+                    x0, x1 = j * cell_size, (j + 1) * cell_size
+                    y0, y1 = 1 - (i + 1) * cell_size, 1 - i * cell_size
+                    fullsize_fig = go.Figure()
+                    fullsize_fig.add_trace(go.Histogram(
+                        x=exp_data, xbins=dict(start=0.0, end=1.4, size=0.05),
+                        opacity=0.5, marker=dict(color="black"), histnorm="probability density",
+                        name="Experimental"
+                    ))
+                    fullsize_fig.add_trace(go.Histogram(
+                        x=sim_data, xbins=dict(start=0.0, end=1.4, size=0.05),
+                        opacity=0.8, marker=dict(color=color), histnorm="probability density",
+                        name="Simulated"
+                    ))
+
+                    fullsize_fig.update_layout(
+                        title=f"Full Histogram for β={beta:.1f}, k={k:.1f}",
+                        xaxis_title="Interflash Intervals",
+                        yaxis_title="Density",
+                        height=700, width=900,
+                        showlegend=True,
+                        barmode="overlay"
+                    )
+                    stat_val = round(compare_statistic(exp_data, sim_data, comp='cramervm'),3)
+                    fullsize_filename = f"figs/fullsize/{model_name}_{stat_val}_cvmcomp_Beta_{beta:.1f}_K_{k:.1f}_Freq_{driven_freq}.html"
+                    fullsize_url = f"{fullsize_filename}"
+                    pio.write_html(fullsize_fig, file=fullsize_filename)
+
+                    fig.add_trace(go.Histogram(
+                            x=exp_data, xbins=dict(start=0.0, end=1.4, size=0.05),
+                            opacity=0.5, marker=dict(color='black'), histnorm='probability density',
+                            name=f"Exp β={beta:.1f}, k={k:.1f}",
+                            xaxis=f"x{axis_idx}", yaxis=f"y{axis_idx}"
+                    ))
+
+                    fig.add_trace(go.Histogram(
+                            x=sim_data, xbins=dict(start=0.0, end=1.4, size=0.05),
+                            opacity=0.8, marker=dict(color=color), histnorm='probability density',
+                            name=f"Sim β={beta:.1f}, k={k:.1f}",
+                            xaxis=f"x{axis_idx}", yaxis=f"y{axis_idx}"
+                    ))
+                    links.append({
+                        "x0": x0, "x1": x1, "y0": y0, "y1": y1,
+                        "link": fullsize_url
+                    })
+                    if j == 0:
+                        annotations.append(dict(
+                            x=-0.1, y=(y0 + y1) / 2, text=f"β={beta:.1f}",
+                            showarrow=False, font=dict(size=10), xref="paper", yref="paper"
+                        ))
+
+                    if i == 0:
+                        annotations.append(dict(
+                            x=(x0 + x1) / 2, y=1.05, text=f"k={k:.1f}",
+                            showarrow=False, font=dict(size=10), xref="paper", yref="paper"
+                        ))
+
+                    axis_settings[f"xaxis{axis_idx}"] = dict(domain=[x0, x1], showgrid=False, visible=False)
+                    axis_settings[f"yaxis{axis_idx}"] = dict(domain=[y0, y1], showgrid=False, visible=False)
+
+                fig.update_layout(**axis_settings)
+
+            fig.update_layout(
+                title=f"100 Histograms for Driven Frequency {driven_freq} - {model_name}",
+                height=1000, width=1000,
+                showlegend=False,
+                annotations=annotations,
+                margin=dict(l=90, r=20, t=100, b=50),
+                dragmode="pan",  # Enables independent zooming
+                hovermode="closest",
+                barmode="overlay"
+            )
+
+            main_html_filename = f"figs/Grid_Histograms_DrivenFreq_{driven_freq}_Model_{model_name}.html"
+            pio.write_html(fig, file=main_html_filename)
+            #
+            # with open(main_html_filename, "r") as f:
+            #     html_content = f.read()
+            #
+            # clickable_js = """
+            # <script>
+            # document.addEventListener("DOMContentLoaded", function() {
+            #     let plotContainer = document.querySelector("div.plotly");
+            #     let plotRect = plotContainer.getBoundingClientRect();
+            #
+            #     let links = [
+            # """
+            # for link in links:
+            #     clickable_js += f"""
+            #         {{x0: {link['x0']}, x1: {link['x1']}, y0: {link['y0']}, y1: {link['y1']}, url: "{link['link']}"}},
+            #     """
+            #
+            # clickable_js += """
+            #     ];
+            #
+            #     plotContainer.addEventListener("click", function(event) {
+            #         let x = (event.clientX - plotRect.left) / plotRect.width;
+            #         let y = 1 - ((event.clientY - plotRect.top) / plotRect.height);
+            #
+            #         console.log("Clicked at:", x, y);
+            #
+            #         for (let link of links) {
+            #             if (x >= link.x0 && x <= link.x1 && y >= link.y0 && y <= link.y1) {
+            #                 let fullPath = new URL(link.url, window.location.origin).href;
+            #                 console.log("Redirecting to:", fullPath);
+            #                 window.open(fullPath, "_blank");
+            #                 return;
+            #             }
+            #         }
+            #     });
+            # });
+            # </script>
+            # """
+            #
+            # html_content = html_content.replace("</body>", clickable_js + "\n</body>")
+            #
+            # with open(main_html_filename, "w") as f:
+            #     f.write(html_content)
+
+            print(f"Saved interactive grid with clickable subplots: {main_html_filename}")
+            print("Full-sized plots saved in: figs/fullsize/")
+
+
 def compare_models(experimental, list_of_sims, plot=False):
     colormap = cm.get_cmap('Spectral', 24)
     comparison_across = {}
+    #generate_heatmap(experimental, list_of_sims, compare_method='cramervm', plot=True)
+    generate_histograms(experimental, list_of_sims)
 
-    for compare_method in ['mode']:  # ['ks','median', 'mode'], 'abc' pending
+    for compare_method in ['ks', 'mode']:  # ['ks','median', 'mode'], 'abc' pending
+        print('Comparing with {} test'.format(compare_method))
         freq_level = {}
         model_min_sums = []
         model_level_heatmaps = []
         min_stat_all = 999
         max_stat_all = -1
         for s in list_of_sims:
+            print('Analyzing {} with {}'.format(s, compare_method))
             freq_level[s[0]] = {}
             model_min_sum = 0
             df_combined = s[1]
@@ -305,13 +585,14 @@ def compare_models(experimental, list_of_sims, plot=False):
                         subset = df_combined[(df_combined['beta'] == beta) & (df_combined['k_thresh'] == k) & (
                                     df_combined['driven_freq'] == x)]['interflashes_1']
 
+                        subset_vals = np.array(subset.values[0])
                         # subset is the simulated data at the particular beta and k required
                         # experimental[x] is the real data comparator
                         # bigfig bigax has all the subsets plotted against the experimental, with the best fit
                         # made bold and prominent
                         # once again, best fit is KS but should be ABC
 
-                        y, bin_edges = np.histogram(np.array(subset.values[0]), bins=np.arange(0.0, 2.0, 0.04), density=True)
+                        y, bin_edges = np.histogram(subset_vals, bins=np.arange(0.0, 2.0, 0.04), density=True)
                         ys = [height for height in y]
                         bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
                         x_nice = np.linspace(min(bin_centers), max(bin_centers), 300)
@@ -319,7 +600,7 @@ def compare_models(experimental, list_of_sims, plot=False):
                         y_nice = _nice(x_nice)
                         y_nice = [y if y > 0.0 else 0.0 for y in y_nice]
 
-                        c_statistic = compare_statistic(subset.iloc[0], experimental[x], compare_method)
+                        c_statistic = compare_statistic(subset_vals, experimental[x], compare_method)
                         if c_statistic < min_stat:
                             min_stat = c_statistic
                             min_line_index = index
@@ -345,7 +626,7 @@ def compare_models(experimental, list_of_sims, plot=False):
                             ax1.hist(experimental_x, density=True, bins=np.arange(0.0, 2.0, 0.04),
                                      color=color, alpha=0.7)
                         if plot:
-                            if compare_method == 'mode':
+                            if compare_method == 'ks':
                                 plt.savefig('figs/histogram_comparisons/{}{}_{}ms_{}beta_{}k_{}.png'.format(
                                     c_statistic, compare_method, x, beta, k, s[0])
                                 )
@@ -380,6 +661,7 @@ def compare_models(experimental, list_of_sims, plot=False):
                     plt.legend()
                     plt.savefig('figs/all_stacked_{}_{}_{}comp.png'.format(x, s[0], compare_method))
                     plt.close(bigfig)
+
             to_heatmap = {}
             to_heatmap_sums = []
             for i, beta in enumerate(betas):
@@ -437,7 +719,7 @@ def compare_models(experimental, list_of_sims, plot=False):
                 all_min_stats.append(min_ks_stat)
                 to_heatmap_sums.append((min_beta, min_k, min_ks_stat))
                 heatmap_data = df.pivot('beta', 'k', 'ks_stat')
-                if compare_method == 'mode':
+                if compare_method == 'ks':
                     if comparison_across.get(s[0]):
                         comparison_across[s[0]].append((k, min_ks_stat))
                     else:
@@ -532,6 +814,7 @@ def compare_models(experimental, list_of_sims, plot=False):
         plt.legend()
         plt.savefig('figs/Aggregate_model_comparison.png')
         plt.close()
+
 
     print('Finished comparing!')
     if plot:

@@ -7,15 +7,15 @@ import analysis
 
 def load_from_csvs(cp):
     p = cp[0]
-    e_r = analysis.load_parameter_sweep_data(p)
+    e_r = analysis.load_parameter_sweep_data(p, pickle=True)
     print('loaded E')
 
     p = cp[1]
-    er_r = analysis.load_parameter_sweep_data(p)
+    er_r = analysis.load_parameter_sweep_data(p, pickle=True)
     print('loaded ER')
 
     p = cp[2]
-    ei_r = analysis.load_parameter_sweep_data(p)
+    ei_r = analysis.load_parameter_sweep_data(p, pickle=True)
     print('loaded EI')
     return e_r, er_r, ei_r
 
@@ -44,6 +44,7 @@ def main():
     parser.add_argument('--use_csvs', action='store_true')
     parser.add_argument('--plot', action='store_true')
     parser.add_argument('--data_folder', type=str, default='data')
+    parser.add_argument('--res_folder', type=str, default='driven_res')
     parser.add_argument('--output', type=str, default='all_afters_from_experiments')
     args = parser.parse_args()
 
@@ -55,12 +56,12 @@ def main():
     for led_freq in led_freqs:
         expected_afters[led_freq] = output_dist[str(int(led_freq * 1000))]
 
-    csv_paths = ['{}/dists_E.csv'.format(args.data_folder),
-                 '{}/dists_ER.csv'.format(args.data_folder),
-                 '{}/dists_EI.csv'.format(args.data_folder)]
-    pickle_paths = ['{}/Excitatory_df_combined_0.pickle'.format(args.data_folder),
-                    '{}/Excitatory-refractory_df_combined_0.pickle'.format(args.data_folder),
-                    '{}/Excitatory-inhibitory_df_combined_0.pickle'.format(args.data_folder)]
+    csv_paths = ['{}/dists_E.csv'.format(args.res_folder),
+                 '{}/dists_ER.csv'.format(args.res_folder),
+                 '{}/dists_EI.csv'.format(args.res_folder)]
+    pickle_paths = ['{}/dists_E_df_combined.pickle'.format(args.res_folder),
+                    '{}/dists_ER_df_combined.pickle'.format(args.res_folder),
+                    '{}/dists_EI_df_combined.pickle'.format(args.res_folder)]
     if args.use_csvs:
         excitatory_results, excitatory_refractory_results, excitatory_inhibitory_results = load_from_csvs(csv_paths)
     else:

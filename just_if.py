@@ -16,7 +16,8 @@ import analysis
 
 class Simulation:
     def __init__(self, trial_num, trial_beta, trial_k, if_df, fc_df, ib_df, trial_td, trial_driven, trial_driver,
-                 trial_driven_freq, trial_n_models, trial_T, dt, model_specifics, trial_log, attn, on_grid, scale_same):
+                 trial_driven_freq, trial_n_models, trial_T, dt, model_specifics, trial_log, attn, skip_prob, dropout_rate,
+                 on_grid, scale_same):
         self.trial_num = trial_num
         self.beta = trial_beta
         self.k = trial_k
@@ -44,8 +45,17 @@ class Simulation:
         self.w_p = (w_p - np.min(w_p, axis=0)) / (np.max(w_p, axis=0) - np.min(w_p, axis=0))
 
         self.attns = np.full(self.n_models, self.attn)
+        self.skip_prob = np.full(self.n_models, skip_prob)
+        if dropout_rate > 0:
+            dropout_values = np.random.normal(loc=dropout_rate, scale=0.25 * dropout_rate, size=self.n_models)
+            self.dropout_probs = np.full(self.n_models, dropout_values)
+
+        else:
+            self.dropout_probs = np.full(self.n_models, dropout_rate)
+
         self.precomputed_distances = {}
-        self.default_rate_scale = 5
+        self.default_rate_scale = dropout_rate
+        self.dropped_out = np.random.random(size=self.n_models) < dropout_rate
 
         if on_grid:
             self.connectivity_graph, self.node_positions = self.initialize_grid_network()
@@ -60,9 +70,9 @@ class Simulation:
 
         G = nx.grid_2d_graph(size, size)
 
-        for (u, v) in list(G.edges()):
-            if random.random() >= 0.0:
-                G.remove_edge(u, v)
+        # for (u, v) in list(G.edges()):
+        #     if random.random() >= 0.0:
+        #         G.remove_edge(u, v)
 
         positions = {}
         for x in range(size):
@@ -110,14 +120,15 @@ class Simulation:
         ks[:] = self.k
         b = self.beta
         ms = self.model
-        print('Trial {} - k {} - beta {} - driven freq {}'.format(self.trial_num,
-                                                                  self.k,
-                                                                  self.beta,
-                                                                  self.driven_freq))
+        print('{} Trial {} - k {} - beta {} - driven freq {}'.format(self.model,
+                                                                     self.trial_num,
+                                                                     self.k,
+                                                                     self.beta,
+                                                                     self.driven_freq))
         t = np.arange(0, self.T, self.dt)  # Time vector
         initial_tcs = self.if_df.sample(self.n_models, ignore_index=True).to_numpy().reshape(1, self.n_models)
         if self.scale_same:
-            min_val, max_val = 0.58, 0.63
+            min_val, max_val = 0.50, 0.60
             original_min, original_max = initial_tcs.min(), initial_tcs.max()
             scaled_tcs = ((initial_tcs - original_min) / (original_max - original_min)) * (max_val - min_val) + min_val
             initial_tcs = scaled_tcs
@@ -129,11 +140,6 @@ class Simulation:
         else:
             initial_sleep_period = 0
         rates = np.full(self.n_models, initial_tcs)  # Initial inter-flash intervals for all models
-        rate_scale = self.default_rate_scale
-        poisson_base_rates = rates * rate_scale  # Base lambda rates for Poisson
-        individual_dropout_probs = np.random.poisson(poisson_base_rates) / 100
-        individual_dropout_probs = np.clip(individual_dropout_probs, 0, 1)  # Ensure valid probabilities
-        base_dropout_probs = individual_dropout_probs
         states = np.full(self.n_models, 'integrate', dtype='<U10')  # States for all models
         flash_counts = np.full(self.n_models, initial_fcs)
         flash_counts = np.ceil(np.sqrt(flash_counts)).astype(int)
@@ -150,17 +156,10 @@ class Simulation:
                     V[j, i] = V[j, i - 1] + rate
                     if not self.driven:
                         if V[j, i] >= 1:
-                            if individual_dropout_probs[j] < np.random.random():
-                                flash_counts[j] -= 1
-                                V[j, i] = 1.0
-                                states[j] = 'reset'
-                                rate_scale += 2
-                                individual_dropout_probs[j] = np.clip(np.random.poisson(
-                                    rates[j] * rate_scale) / 100, 0, 1)
-                            else:
-                                V[j, i] = 0.0
-                                individual_dropout_probs[j] = base_dropout_probs[j]
-                                rate_scale = self.default_rate_scale
+                            flash_counts[j] -= 1
+                            V[j, i] = 1.0
+                            states[j] = 'reset'
+
                     else:
                         if V[j, i] >= 1:
                             if j == self.driver:
@@ -172,23 +171,21 @@ class Simulation:
                                     states[j] = 'reset'
 
                             else:
-                                if individual_dropout_probs[j] < np.random.random():
-                                    flash_counts[j] -= 1
-                                    V[j, i] = 1.0
-                                    states[j] = 'reset'
-                                    rate_scale += 2
-                                    individual_dropout_probs[j] = np.clip(np.random.poisson(
-                                        rates[j] * rate_scale) / 100, 0, 1
-                                                                          )
-                                else:
+                                if np.random.rand() < self.skip_prob[j]:
+                                    # Skip flash: reset voltage, stay in integrate
                                     V[j, i] = 0.0
-                                    individual_dropout_probs[j] = base_dropout_probs[j]
-                                    rate_scale = self.default_rate_scale
+                                    states[j] = 'integrate'
+                                    continue
+
+                                flash_counts[j] -= 1
+                                V[j, i] = 1.0
+                                states[j] = 'reset'
 
                 elif states[j] == 'reset':
                     V[j, i] = V[j, i - 1] - (self.dt / self.td)
                     if V[j, i] <= 0:
                         V[j, i] = 0.0
+
                         states[j] = 'integrate'
                         rates[j] = initial_tcs[0][j]
                         if flash_counts[j] <= 0:
@@ -196,76 +193,70 @@ class Simulation:
                                 if j != self.driver:
                                     rates[j] = math.sqrt(self.ib_df.sample().values[0])
                                     flash_counts[j] = np.ceil(np.sqrt(self.fc_df.sample().values[0]).astype(int))
-                            else:
-                                self.attns[j] = self.attn
-                                rates[j] = math.sqrt(self.ib_df.sample().values[0])
-                                flash_counts[j] = np.ceil(np.sqrt(self.fc_df.sample().values[0]).astype(int))
+                                else:
+                                    self.attns[j] = self.attn
+                                    rates[j] = math.sqrt(self.ib_df.sample().values[0])
+                                    flash_counts[j] = np.ceil(np.sqrt(self.fc_df.sample().values[0]).astype(int))
+                                    self.dropped_out[j] = (np.random.random() < self.dropout_probs[j])
 
-                # Coupling from other flashers
-                # If sight lines are established do coupling, else skip
-                if 0.0 <= self.attn:  # self.w_p[i] < self.attn:
-                    active_flashers = len([x for x in states if x != 'integrate'])
-                    # go through all other individuals
+                if 0.0 <= self.attn and not self.dropped_out[j]:
+                    active_flashers = len([x for x in states if x == 'reset'])
                     for indiv in range(self.n_models):
                         if self.driven:
-                            # If j (acting individual) is the driver, it does not receive coupling
                             if j == self.driver:
-                                V[j, i] = min(V[j, i], 1.0)
-                                V[j, i] = max(V[j, i], 0.0)
-                            else:
-                                # If j (acting individual) is not the neighbor indiv, it receives coupling if
-                                # a) indiv is resetting (flashing)
-                                # b) j (acting individual) is integrating (charging)
-                                if indiv != j and states[indiv] == 'reset' and states[j] == 'integrate':
-                                    if ks[j] <= V[j, i] <= 1:
-                                        V[j, i] += (b / active_flashers)
+                                continue  # driver is not influenced
+                            if indiv != j and states[indiv] == 'reset' and states[j] == 'integrate':
+
+                                if ms == 'E':
+                                    # Always add beta
+                                    V[j, i] += b / active_flashers
+                                    V[j, i] = min(V[j, i], 1.0)
+
+                                elif ms == 'EI':
+                                    if V[j, i] < ks[j] / 2:
+                                        pass
+                                    elif ks[j] / 2 <= V[j, i] < ks[j]:
+                                        V[j, i] += b / active_flashers
                                         V[j, i] = min(V[j, i], 1.0)
-                                    elif 0 <= V[j, i] < ks[j]:
-                                        if ms == 'E':
-                                            V[j, i] += (b / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
-                                        elif ms == 'ER':
-                                            V[j, i] += (0 / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
-                                        else:  # EI
-                                            V[j, i] -= (b / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
+                                    else:
+                                        # If V >= k
+                                        V[j, i] -= b / active_flashers
+                                        V[j, i] = max(V[j, i], 1.0)
+
+                                elif ms == 'ER':
+                                    if V[j, i] >= ks[j]:
+                                        # Add beta
+                                        V[j, i] += b / active_flashers
+                                        V[j, i] = min(V[j, i], 1.0)
+                                    # Otherwise, do nothing
                         else:
+                            # Handle connectivity graph if applicable
                             if self.connectivity_graph:
                                 if indiv != j and states[indiv] == 'reset' and states[j] != 'reset':
                                     indiv_coord = self.map_to_2d(indiv)
                                     j_coord = self.map_to_2d(j)
-
-                                    self.connectivity_graph.add_edge(indiv_coord, j_coord)
-                                    if ks[j] <= V[j, i] <= 1:
-                                        V[j, i] += (b / active_flashers)
-                                        V[j, i] = min(V[j, i], 1.0)
-                                    elif 0 <= V[j, i] < ks[j]:
+                                    if self.connectivity_graph.has_edge(indiv, j_coord):
                                         if ms == 'E':
-                                            V[j, i] += (b / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
-                                        elif ms == 'ER':
-                                            V[j, i] += (0 / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
-                                        else:  # EI
-                                            V[j, i] -= (b / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
-                            else:
-                                if indiv != j and states[indiv] == 'reset' and states[j] != 'reset':
-                                    if ks[j] <= V[j, i] <= 1:
-                                        V[j, i] += (b / active_flashers)
-                                        V[j, i] = min(V[j, i], 1.0)
-                                    elif 0 <= V[j, i] < ks[j]:
-                                        if ms == 'E':
-                                            V[j, i] += (b / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
-                                        elif ms == 'ER':
-                                            V[j, i] += (0 / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
-                                        else:  # EI
-                                            V[j, i] -= (b / active_flashers)
-                                            V[j, i] = max(V[j, i], 0.0)
+                                            # Always add beta
+                                            V[j, i] += b / active_flashers
+                                            V[j, i] = min(V[j, i], 1.0)
 
+                                        elif ms == 'EI':
+                                            if V[j, i] < ks[j] / 2:
+                                                pass
+                                            elif ks[j] / 2 <= V[j, i] < ks[j]:
+                                                V[j, i] += b / active_flashers
+                                                V[j, i] = min(V[j, i], 1.0)
+                                            else:
+                                                # If V >= k
+                                                V[j, i] -= b / active_flashers
+                                                V[j, i] = max(V[j, i], 1.0)
+
+                                        elif ms == 'ER':
+                                            if V[j, i] >= ks[j]:
+                                                # Add beta
+                                                V[j, i] += b / active_flashers
+                                                V[j, i] = min(V[j, i], 1.0)
         # stat keeping
         vs = []
         for j in range(self.n_models):
@@ -388,6 +379,10 @@ def load_args():
                         help='Number of individuals to simulate')
     parser.add_argument('--n_trials', type=int, default=1,
                         help='Number of trials to per parameter set')
+    parser.add_argument('--dropout_rate', type=float, default=0.0,
+                        help='How strong to make the error rate (0 is no error rate)')
+    parser.add_argument('--skip_prob', type=float, default=0.0,
+                        help='How often individuals skip flashes (0 is never)')
     parser.add_argument('--ks',
                         type=parse_ks,
                         default=None,
@@ -431,6 +426,8 @@ def main():
                                    args.model_specifics,
                                    args.log,
                                    args.attention_rate,
+                                   args.skip_prob,
+                                   args.dropout_rate,
                                    args.on_grid,
                                    args.scale_same)
                     processes.append(p)
